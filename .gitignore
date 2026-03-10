@@ -1,0 +1,5 @@
+# Compiled output
+/target/
+
+# Cargo lock file (keep for binaries)
+Cargo.lock
