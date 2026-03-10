@@ -127,16 +127,22 @@ fn patch_check_requirements(script_path: &Path) -> Result<()> {
     let content = fs::read_to_string(script_path)
         .with_context(|| format!("Cannot read {}", script_path.display()))?;
 
-    let already_patched = content.contains("# patched by code_glibc_fixer");
-    if already_patched {
+    if content.contains("# patched by code_glibc_fixer") {
         println!("[fix] check-requirements.sh already patched, skipping.");
         return Ok(());
     }
 
-    // Replace the logic that sets found_required_glibc and found_required_glibcxx
-    // Strategy: inject override lines right after the shebang / at the start of the script
-    // that force found_required_glibc=1 and found_required_glibcxx=1
-    let patched = inject_glibc_override(&content);
+    let patched = replace_glibc_vars(&content);
+
+    // Sanity check: make sure we actually replaced something
+    if patched == content {
+        println!(
+            "[fix] WARNING: could not find 'found_required_glibc=0' or 'found_required_glibcxx=0' \
+             in {}. The script format may have changed; skipping patch.",
+            script_path.display()
+        );
+        return Ok(());
+    }
 
     fs::write(script_path, &patched)
         .with_context(|| format!("Cannot write patched {}", script_path.display()))?;
@@ -145,23 +151,43 @@ fn patch_check_requirements(script_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Inject override variables right after the shebang line so glibc checks always pass.
-fn inject_glibc_override(content: &str) -> String {
-    let inject = concat!(
-        "# patched by code_glibc_fixer - force glibc/glibcxx checks to pass\n",
-        "found_required_glibc=1\n",
-        "found_required_glibcxx=1\n",
-    );
+/// Find lines that set `found_required_glibc=0` / `found_required_glibcxx=0` and replace them
+/// with `=1`, prepending a comment marker on the preceding line.
+///
+/// This matches the exact pattern in VSCode Server's check-requirements.sh, e.g.:
+///   found_required_glibc=0
+///   found_required_glibcxx=0
+fn replace_glibc_vars(content: &str) -> String {
+    let comment = "# patched by code_glibc_fixer - force glibc/glibcxx checks to pass";
+    let mut out = String::with_capacity(content.len() + 128);
 
-    // Find shebang line
-    if let Some(newline_pos) = content.find('\n') {
-        let shebang = &content[..=newline_pos];
-        let rest = &content[newline_pos + 1..];
-        format!("{}{}{}", shebang, inject, rest)
-    } else {
-        // No newline found, just prepend
-        format!("{}\n{}", inject, content)
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == "found_required_glibc=0" {
+            out.push_str(comment);
+            out.push('\n');
+            // Preserve original indentation
+            let indent = &line[..line.len() - trimmed.len()];
+            out.push_str(indent);
+            out.push_str("found_required_glibc=1");
+        } else if trimmed == "found_required_glibcxx=0" {
+            out.push_str(comment);
+            out.push('\n');
+            let indent = &line[..line.len() - trimmed.len()];
+            out.push_str(indent);
+            out.push_str("found_required_glibcxx=1");
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
     }
+
+    // Preserve original trailing newline behaviour
+    if !content.ends_with('\n') && out.ends_with('\n') {
+        out.pop();
+    }
+
+    out
 }
 
 /// Build the path to a vscode-server entry given the bin dir and a directory name (hash)
